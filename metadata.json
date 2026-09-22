@@ -1,0 +1,8 @@
+{
+  "name": "Gemini API Playground",
+  "description": "Secure server-side Gemini API playground for Vercel",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
