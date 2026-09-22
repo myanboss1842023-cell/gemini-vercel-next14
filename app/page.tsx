@@ -1,39 +1,61 @@
 "use client";
 
-import { FormEvent, useState } from "react";
-
-const MODEL_OPTIONS = [
-  {
-    label: "Gemini 3.8 Flash (smartest, default)",
-    value: "gemini-3.8-flash",
-  },
-  {
-    label: "Gemini 3.7 Flash",
-    value: "gemini-3.7-flash",
-  },
-  {
-    label: "Gemini 3.6 Flash (cheaper, faster)",
-    value: "gemini-3.6-flash",
-  },
-  {
-    label: "Gemini 3.5 Flash-Lite (cheapest)",
-    value: "gemini-3.5-flash-lite",
-  },
-] as const;
+import { FormEvent, useEffect, useState } from "react";
+import {
+  SUPPORTED_MODELS,
+  DEFAULT_MODEL_ID,
+  getModelDisplayName,
+  GeminiModelConfig,
+} from "@/lib/models";
 
 type HealthState =
   | { status: "idle" }
-  | { status: "connected"; model: string }
-  | { status: "disconnected"; error?: string };
+  | {
+      status: "connected";
+      requestedModel: string;
+      actualModel: string;
+      fallbackUsed: boolean;
+      fallbackReason?: string | null;
+    }
+  | {
+      status: "disconnected";
+      requestedModel?: string;
+      error?: string;
+    };
+
+interface LastExecutionDiagnostics {
+  requestedModelId: string;
+  actualModelId: string;
+  fallbackUsed: boolean;
+  fallbackReason?: string | null;
+  timestamp: string;
+  source: "generate" | "health_check";
+}
 
 export default function HomePage() {
+  const [models, setModels] = useState<GeminiModelConfig[]>(SUPPORTED_MODELS);
   const [prompt, setPrompt] = useState("");
-  const [selectedModel, setSelectedModel] = useState("gemini-3.8-flash");
+  const [selectedModelId, setSelectedModelId] = useState<string>(DEFAULT_MODEL_ID);
   const [responseText, setResponseText] = useState("");
   const [sendError, setSendError] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [health, setHealth] = useState<HealthState>({ status: "idle" });
+  const [lastExecution, setLastExecution] = useState<LastExecutionDiagnostics | null>(null);
+
+  useEffect(() => {
+    // Single source of truth sync from authoritative server config
+    fetch("/api/gemini/config")
+      .then((res) => res.json())
+      .then((data: { models?: GeminiModelConfig[]; defaultModelId?: string }) => {
+        if (Array.isArray(data.models) && data.models.length > 0) {
+          setModels(data.models);
+        }
+      })
+      .catch((err) => {
+        console.warn("Failed to load /api/gemini/config:", err);
+      });
+  }, []);
 
   async function handleSend(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -56,13 +78,17 @@ export default function HomePage() {
         },
         body: JSON.stringify({
           prompt,
-          model: selectedModel,
+          model: selectedModelId,
         }),
       });
 
       const data: {
         success?: boolean;
         text?: string;
+        requestedModel?: string;
+        actualModel?: string;
+        fallbackUsed?: boolean;
+        fallbackReason?: string | null;
         error?: string;
       } = await res.json();
 
@@ -71,6 +97,27 @@ export default function HomePage() {
       }
 
       setResponseText(data.text || "");
+
+      const actual = data.actualModel || selectedModelId;
+      const requested = data.requestedModel || selectedModelId;
+      const fallback = Boolean(data.fallbackUsed);
+
+      setHealth({
+        status: "connected",
+        requestedModel: requested,
+        actualModel: actual,
+        fallbackUsed: fallback,
+        fallbackReason: data.fallbackReason,
+      });
+
+      setLastExecution({
+        requestedModelId: requested,
+        actualModelId: actual,
+        fallbackUsed: fallback,
+        fallbackReason: data.fallbackReason,
+        timestamp: new Date().toLocaleTimeString(),
+        source: "generate",
+      });
     } catch (error) {
       setSendError(
         error instanceof Error ? error.message : "Gemini API request failed"
@@ -85,38 +132,65 @@ export default function HomePage() {
     setHealth({ status: "idle" });
 
     try {
-      const res = await fetch("/api/health", {
-        method: "GET",
-        cache: "no-store",
-      });
+      const res = await fetch(
+        `/api/health?model=${encodeURIComponent(selectedModelId)}`,
+        {
+          method: "GET",
+          cache: "no-store",
+        }
+      );
 
       const data: {
         connected?: boolean;
+        requestedModel?: string;
+        actualModel?: string;
+        fallbackUsed?: boolean;
+        fallbackReason?: string | null;
         model?: string;
         error?: string;
       } = await res.json();
 
       if (data.connected) {
+        const actual = data.actualModel || data.model || selectedModelId;
+        const requested = data.requestedModel || selectedModelId;
+        const fallback = Boolean(data.fallbackUsed);
+
         setHealth({
           status: "connected",
-          model: data.model || "gemini-3.5-flash-lite",
+          requestedModel: requested,
+          actualModel: actual,
+          fallbackUsed: fallback,
+          fallbackReason: data.fallbackReason,
+        });
+
+        setLastExecution({
+          requestedModelId: requested,
+          actualModelId: actual,
+          fallbackUsed: fallback,
+          fallbackReason: data.fallbackReason,
+          timestamp: new Date().toLocaleTimeString(),
+          source: "health_check",
         });
         return;
       }
 
       setHealth({
         status: "disconnected",
+        requestedModel: data.requestedModel || selectedModelId,
         error: data.error,
       });
     } catch (error) {
       setHealth({
         status: "disconnected",
+        requestedModel: selectedModelId,
         error: error instanceof Error ? error.message : "Health check failed",
       });
     } finally {
       setIsTesting(false);
     }
   }
+
+  const selectedModelConfig = models.find((m) => m.id === selectedModelId);
 
   return (
     <main className="shell">
@@ -136,13 +210,13 @@ export default function HomePage() {
             </label>
             <select
               id="model"
-              value={selectedModel}
-              onChange={(event) => setSelectedModel(event.target.value)}
+              value={selectedModelId}
+              onChange={(event) => setSelectedModelId(event.target.value)}
               disabled={isSending}
             >
-              {MODEL_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
+              {models.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.displayName} {option.description ? `— ${option.description}` : ""}
                 </option>
               ))}
             </select>
@@ -210,9 +284,15 @@ export default function HomePage() {
               </button>
 
               {health.status === "connected" ? (
-                <span className="pill pill-green">
-                  ✓ Connected — {health.model}
-                </span>
+                health.fallbackUsed ? (
+                  <span className="pill pill-amber" title={health.fallbackReason || "Fallback active"}>
+                    ⚠️ Connected — {getModelDisplayName(health.actualModel)} ({health.actualModel})
+                  </span>
+                ) : (
+                  <span className="pill pill-green">
+                    ✓ Connected — {getModelDisplayName(health.actualModel)}
+                  </span>
+                )
               ) : health.status === "disconnected" ? (
                 <span className="pill pill-red">
                   ✗ Not connected{health.error ? ` — ${health.error}` : ""}
@@ -221,12 +301,75 @@ export default function HomePage() {
                 <span className="pill pill-neutral">Not tested</span>
               )}
             </div>
+
+            {health.status === "connected" && health.fallbackUsed && (
+              <div className="fallbackNotice">
+                <strong>Fallback: ACTIVE</strong> — Requested: {getModelDisplayName(health.requestedModel)} (<code>{health.requestedModel}</code>) &rarr; Executed: {getModelDisplayName(health.actualModel)} (<code>{health.actualModel}</code>).
+                {health.fallbackReason ? ` Reason: ${health.fallbackReason}` : ""}
+              </div>
+            )}
+          </div>
+
+          <div className="divider" />
+
+          <div>
+            <h2 className="sectionTitle">Diagnostics &amp; Model Sync</h2>
+            <div className="diagList">
+              <div className="diagRow">
+                <span className="diagKey">Selected UI Model:</span>
+                <span className="diagVal">
+                  {selectedModelConfig ? selectedModelConfig.displayName : selectedModelId}
+                </span>
+              </div>
+              <div className="diagRow">
+                <span className="diagKey">Requested Model ID:</span>
+                <span className="diagVal">
+                  <code>{selectedModelId}</code>
+                </span>
+              </div>
+              <div className="diagRow">
+                <span className="diagKey">Actual Executed Model:</span>
+                <span className="diagVal">
+                  {lastExecution ? (
+                    <code>{lastExecution.actualModelId}</code>
+                  ) : (
+                    <span className="muted">None executed yet</span>
+                  )}
+                </span>
+              </div>
+              <div className="diagRow">
+                <span className="diagKey">Fallback Status:</span>
+                <span className="diagVal">
+                  {lastExecution ? (
+                    lastExecution.fallbackUsed ? (
+                      <span className="pill pill-amber" style={{ minHeight: "26px", fontSize: "11px", padding: "0 8px" }}>
+                        ACTIVE (Fallback from {lastExecution.requestedModelId})
+                      </span>
+                    ) : (
+                      <span className="pill pill-green" style={{ minHeight: "26px", fontSize: "11px", padding: "0 8px" }}>
+                        INACTIVE (100% Model Match)
+                      </span>
+                    )
+                  ) : (
+                    <span className="muted">Standby (Run test or prompt)</span>
+                  )}
+                </span>
+              </div>
+              {lastExecution && (
+                <div className="diagRow">
+                  <span className="diagKey">Last Verified By:</span>
+                  <span className="diagVal" style={{ color: "#8c9cb6", fontSize: "12px" }}>
+                    {lastExecution.source === "generate" ? "Prompt Generation" : "Connection Health Test"} at {lastExecution.timestamp}
+                  </span>
+                </div>
+              )}
+            </div>
           </div>
         </section>
 
         <p className="footerNote">
           The Gemini SDK runs only in the server API routes. Keep your
-          GEMINI_API_KEY in Vercel Environment Variables and never expose it to
+          GEMINI_API_KEY in Environment Variables and never expose it to
           the browser.
         </p>
       </div>

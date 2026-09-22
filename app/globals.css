@@ -217,6 +217,59 @@ button:disabled {
   border-color: rgba(255, 125, 137, 0.35);
 }
 
+.pill-amber {
+  color: #fed7aa;
+  background: rgba(180, 83, 9, 0.25);
+  border-color: rgba(245, 158, 11, 0.4);
+}
+
+.diagList {
+  display: grid;
+  gap: 8px;
+  background: #0b1220;
+  border: 1px solid #243044;
+  border-radius: 12px;
+  padding: 14px;
+}
+
+.diagRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.diagKey {
+  color: #8c9cb6;
+  font-weight: 600;
+}
+
+.diagVal {
+  color: #e8eef8;
+}
+
+.diagVal code {
+  background: #192234;
+  padding: 2px 7px;
+  border-radius: 6px;
+  border: 1px solid #30405a;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.fallbackNotice {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(180, 83, 9, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  color: #fed7aa;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .spinner {
   width: 15px;
   height: 15px;
