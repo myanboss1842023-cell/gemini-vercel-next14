@@ -8,9 +8,16 @@ import {
 export const runtime = "nodejs";
 
 export async function GET() {
-  return NextResponse.json({
-    models: SUPPORTED_MODELS,
-    defaultModelId: DEFAULT_MODEL_ID,
-    fallbackModelId: FALLBACK_MODEL_ID,
-  });
+  return NextResponse.json(
+    {
+      models: SUPPORTED_MODELS,
+      defaultModelId: DEFAULT_MODEL_ID,
+      fallbackModelId: FALLBACK_MODEL_ID,
+    },
+    {
+      headers: {
+        "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=86400",
+      },
+    }
+  );
 }

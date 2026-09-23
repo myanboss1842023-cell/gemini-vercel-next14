@@ -1,6 +1,7 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
+import Markdown from "react-markdown";
 import {
   SUPPORTED_MODELS,
   DEFAULT_MODEL_ID,
@@ -29,7 +30,7 @@ interface LastExecutionDiagnostics {
   fallbackUsed: boolean;
   fallbackReason?: string | null;
   timestamp: string;
-  source: "generate" | "health_check";
+  source: "stream" | "generate" | "health_check";
 }
 
 export default function HomePage() {
@@ -40,11 +41,14 @@ export default function HomePage() {
   const [sendError, setSendError] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(true);
   const [health, setHealth] = useState<HealthState>({ status: "idle" });
   const [lastExecution, setLastExecution] = useState<LastExecutionDiagnostics | null>(null);
 
+  const abortControllerRef = useRef<AbortController | null>(null);
+
   useEffect(() => {
-    // Single source of truth sync from authoritative server config
+    // Single source of truth sync with cached server config
     fetch("/api/gemini/config")
       .then((res) => res.json())
       .then((data: { models?: GeminiModelConfig[]; defaultModelId?: string }) => {
@@ -60,6 +64,14 @@ export default function HomePage() {
       });
   }, []);
 
+  function handleStop() {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+      setIsSending(false);
+    }
+  }
+
   async function handleSend(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
@@ -73,60 +85,148 @@ export default function HomePage() {
     setSendError("");
     setResponseText("");
 
-    try {
-      const res = await fetch("/api/gemini", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          prompt,
-          model: selectedModelId,
-        }),
-      });
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
-      const data: {
-        success?: boolean;
-        text?: string;
-        requestedModel?: string;
-        actualModel?: string;
-        fallbackUsed?: boolean;
-        fallbackReason?: string | null;
-        error?: string;
-      } = await res.json();
+    if (isStreaming) {
+      // 1. Streaming Mode
+      try {
+        const res = await fetch("/api/gemini/stream", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            prompt,
+            model: selectedModelId,
+          }),
+          signal: controller.signal,
+        });
 
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || "Gemini API request failed");
+        if (!res.ok) {
+          let errMessage = "Stream generation failed";
+          try {
+            const errData = await res.json();
+            errMessage = errData.error || errMessage;
+          } catch {
+            // Keep default
+          }
+          throw new Error(errMessage);
+        }
+
+        const requested = res.headers.get("X-Requested-Model") || selectedModelId;
+        const actual = res.headers.get("X-Actual-Model") || selectedModelId;
+        const fallback = res.headers.get("X-Fallback-Used") === "true";
+        const fallbackReasonRaw = res.headers.get("X-Fallback-Reason");
+        const fallbackReason = fallbackReasonRaw ? decodeURIComponent(fallbackReasonRaw) : null;
+
+        setHealth({
+          status: "connected",
+          requestedModel: requested,
+          actualModel: actual,
+          fallbackUsed: fallback,
+          fallbackReason,
+        });
+
+        setLastExecution({
+          requestedModelId: requested,
+          actualModelId: actual,
+          fallbackUsed: fallback,
+          fallbackReason,
+          timestamp: new Date().toLocaleTimeString(),
+          source: "stream",
+        });
+
+        if (!res.body) {
+          throw new Error("No readable response body received.");
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let accumulated = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          accumulated += chunk;
+          setResponseText(accumulated);
+        }
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          // Aborted by user
+          return;
+        }
+        setSendError(
+          error instanceof Error ? error.message : "Gemini API stream failed"
+        );
+      } finally {
+        setIsSending(false);
+        abortControllerRef.current = null;
       }
+    } else {
+      // 2. Standard Non-Streaming Mode
+      try {
+        const res = await fetch("/api/gemini", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            prompt,
+            model: selectedModelId,
+          }),
+          signal: controller.signal,
+        });
 
-      setResponseText(data.text || "");
+        const data: {
+          success?: boolean;
+          text?: string;
+          requestedModel?: string;
+          actualModel?: string;
+          fallbackUsed?: boolean;
+          fallbackReason?: string | null;
+          error?: string;
+        } = await res.json();
 
-      const actual = data.actualModel || selectedModelId;
-      const requested = data.requestedModel || selectedModelId;
-      const fallback = Boolean(data.fallbackUsed);
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || "Gemini API request failed");
+        }
 
-      setHealth({
-        status: "connected",
-        requestedModel: requested,
-        actualModel: actual,
-        fallbackUsed: fallback,
-        fallbackReason: data.fallbackReason,
-      });
+        setResponseText(data.text || "");
 
-      setLastExecution({
-        requestedModelId: requested,
-        actualModelId: actual,
-        fallbackUsed: fallback,
-        fallbackReason: data.fallbackReason,
-        timestamp: new Date().toLocaleTimeString(),
-        source: "generate",
-      });
-    } catch (error) {
-      setSendError(
-        error instanceof Error ? error.message : "Gemini API request failed"
-      );
-    } finally {
-      setIsSending(false);
+        const actual = data.actualModel || selectedModelId;
+        const requested = data.requestedModel || selectedModelId;
+        const fallback = Boolean(data.fallbackUsed);
+
+        setHealth({
+          status: "connected",
+          requestedModel: requested,
+          actualModel: actual,
+          fallbackUsed: fallback,
+          fallbackReason: data.fallbackReason,
+        });
+
+        setLastExecution({
+          requestedModelId: requested,
+          actualModelId: actual,
+          fallbackUsed: fallback,
+          fallbackReason: data.fallbackReason,
+          timestamp: new Date().toLocaleTimeString(),
+          source: "generate",
+        });
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+        setSendError(
+          error instanceof Error ? error.message : "Gemini API request failed"
+        );
+      } finally {
+        setIsSending(false);
+        abortControllerRef.current = null;
+      }
     }
   }
 
@@ -239,17 +339,31 @@ export default function HomePage() {
               />
             </div>
 
-            <div className="row">
-              <button className="primary" type="submit" disabled={isSending}>
+            <div className="controlsRow">
+              <div className="row">
                 {isSending ? (
-                  <>
+                  <button className="dangerBtn" type="button" onClick={handleStop}>
                     <span className="spinner" aria-hidden="true" />
-                    Generating...
-                  </>
+                    Stop Generation
+                  </button>
                 ) : (
-                  "Send"
+                  <button className="primary" type="submit">
+                    Send
+                  </button>
                 )}
-              </button>
+
+                <div
+                  className="toggleWrapper"
+                  onClick={() => !isSending && setIsStreaming(!isStreaming)}
+                  title="Enable real-time token streaming"
+                >
+                  <div className={`toggleSwitch ${isStreaming ? "active" : ""}`}>
+                    <div className="toggleCircle" />
+                  </div>
+                  <span>Real-time Streaming</span>
+                </div>
+              </div>
+
               {sendError ? <span className="error">{sendError}</span> : null}
             </div>
           </form>
@@ -258,7 +372,17 @@ export default function HomePage() {
             <h2 className="sectionTitle">Response</h2>
             <div className="response">
               {responseText ? (
-                responseText
+                <>
+                  <div className="markdown-body">
+                    <Markdown>{responseText}</Markdown>
+                  </div>
+                  {isSending && <span className="streamCursor" />}
+                </>
+              ) : isSending ? (
+                <span className="muted">
+                  <span className="spinner" aria-hidden="true" />
+                  Streaming tokens from Gemini...
+                </span>
               ) : (
                 <span className="muted">Gemini response appears here...</span>
               )}
@@ -274,7 +398,7 @@ export default function HomePage() {
                 className="secondary"
                 type="button"
                 onClick={handleHealthCheck}
-                disabled={isTesting}
+                disabled={isTesting || isSending}
               >
                 {isTesting ? (
                   <>
@@ -362,7 +486,12 @@ export default function HomePage() {
                 <div className="diagRow">
                   <span className="diagKey">Last Verified By:</span>
                   <span className="diagVal" style={{ color: "#8c9cb6", fontSize: "12px" }}>
-                    {lastExecution.source === "generate" ? "Prompt Generation" : "Connection Health Test"} at {lastExecution.timestamp}
+                    {lastExecution.source === "stream"
+                      ? "Real-time Stream"
+                      : lastExecution.source === "generate"
+                      ? "Prompt Generation"
+                      : "Connection Health Test"}{" "}
+                    at {lastExecution.timestamp}
                   </span>
                 </div>
               )}

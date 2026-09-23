@@ -1,5 +1,5 @@
-import { GoogleGenAI } from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
+import { getGeminiClient } from "@/lib/gemini-client";
 import {
   DEFAULT_MODEL_ID,
   FALLBACK_MODEL_ID,
@@ -27,8 +27,10 @@ export async function GET(req: NextRequest) {
   const requestedModel =
     modelParam && isValidModelId(modelParam) ? modelParam : DEFAULT_MODEL_ID;
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  let ai;
+  try {
+    ai = getGeminiClient();
+  } catch {
     return NextResponse.json(
       {
         connected: false,
@@ -42,8 +44,6 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
-
     // 1. Probe with exact requested model
     try {
       const response = await ai.models.generateContent({
