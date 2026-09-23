@@ -51,6 +51,9 @@ export default function HomePage() {
         if (Array.isArray(data.models) && data.models.length > 0) {
           setModels(data.models);
         }
+        if (data.defaultModelId) {
+          setSelectedModelId(data.defaultModelId);
+        }
       })
       .catch((err) => {
         console.warn("Failed to load /api/gemini/config:", err);

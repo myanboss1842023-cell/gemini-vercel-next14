@@ -3,10 +3,23 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   DEFAULT_MODEL_ID,
   FALLBACK_MODEL_ID,
+  getFallbackModelId,
   isValidModelId,
 } from "@/lib/models";
 
 export const runtime = "nodejs";
+
+function formatFallbackReason(err: unknown): string {
+  if (!err) return "Primary health probe failed";
+  const str = err instanceof Error ? err.message : String(err);
+  if (str.includes("503") || str.includes("high demand") || str.includes("UNAVAILABLE")) {
+    return "Model is currently experiencing high demand (503). Verified connectivity via fallback.";
+  }
+  if (str.includes("429") || str.includes("quota") || str.includes("ResourceExhausted")) {
+    return "Rate limit / quota on primary model. Verified connectivity via fallback.";
+  }
+  return str.length > 150 ? `${str.slice(0, 147)}...` : str;
+}
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
@@ -61,17 +74,18 @@ export async function GET(req: NextRequest) {
         { status: 502 }
       );
     } catch (primaryError) {
-      console.warn(
-        `Health probe for "${requestedModel}" failed:`,
-        primaryError
-      );
+      const cleanReason = formatFallbackReason(primaryError);
 
-      // 2. Fallback policy if requested model probe failed
-      if (requestedModel !== FALLBACK_MODEL_ID) {
-        console.warn(`Health probe attempting fallback to ${FALLBACK_MODEL_ID}...`);
+      // 2. Candidate fallbacks
+      const candidates = [
+        getFallbackModelId(requestedModel),
+        FALLBACK_MODEL_ID,
+      ].filter((m, idx, arr) => m !== requestedModel && arr.indexOf(m) === idx);
+
+      for (const fallbackModel of candidates) {
         try {
           const fallbackResponse = await ai.models.generateContent({
-            model: FALLBACK_MODEL_ID,
+            model: fallbackModel,
             contents: "Reply only with: OK",
           });
 
@@ -80,25 +94,20 @@ export async function GET(req: NextRequest) {
             return NextResponse.json({
               connected: true,
               requestedModel,
-              actualModel: FALLBACK_MODEL_ID,
+              actualModel: fallbackModel,
               fallbackUsed: true,
-              fallbackReason:
-                primaryError instanceof Error
-                  ? primaryError.message
-                  : "Primary model health check failed",
-              model: FALLBACK_MODEL_ID,
+              fallbackReason: cleanReason,
+              model: fallbackModel,
             });
           }
-        } catch (fallbackError) {
-          console.error("Health probe fallback failed:", fallbackError);
+        } catch {
+          // Continue to next candidate
         }
       }
 
       throw primaryError;
     }
   } catch (error) {
-    console.error("Gemini health check failed:", error);
-
     const message =
       error instanceof Error ? error.message : "Health check failed";
 

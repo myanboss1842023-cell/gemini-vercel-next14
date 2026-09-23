@@ -3,10 +3,26 @@ import { NextResponse } from "next/server";
 import {
   DEFAULT_MODEL_ID,
   FALLBACK_MODEL_ID,
+  getFallbackModelId,
   isValidModelId,
 } from "@/lib/models";
 
 export const runtime = "nodejs";
+
+function formatFallbackReason(err: unknown): string {
+  if (!err) return "Primary model unavailable";
+  const str = err instanceof Error ? err.message : String(err);
+  if (str.includes("503") || str.includes("high demand") || str.includes("UNAVAILABLE")) {
+    return "This model is currently experiencing high demand (503). Automatic fallback was activated.";
+  }
+  if (str.includes("429") || str.includes("quota") || str.includes("ResourceExhausted")) {
+    return "Rate limit / quota exceeded on primary model. Automatic fallback was activated.";
+  }
+  if (str.includes("404") || str.includes("NOT_FOUND")) {
+    return "Requested model was not found or is currently decommissioned.";
+  }
+  return str.length > 150 ? `${str.slice(0, 147)}...` : str;
+}
 
 export async function POST(req: Request) {
   let requestedModel = DEFAULT_MODEL_ID;
@@ -58,7 +74,7 @@ export async function POST(req: Request) {
 
     const ai = new GoogleGenAI({ apiKey });
 
-    // 1. Attempt with the exact requested model
+    // 1. Attempt with exact requested model
     try {
       const response = await ai.models.generateContent({
         model: requestedModel,
@@ -74,17 +90,19 @@ export async function POST(req: Request) {
         fallbackReason: null,
       });
     } catch (primaryError) {
-      console.warn(
-        `Primary model request for "${requestedModel}" failed:`,
-        primaryError
-      );
+      const cleanReason = formatFallbackReason(primaryError);
 
-      // 2. Explicit Fallback policy if requested model fails and is not already fallback
-      if (requestedModel !== FALLBACK_MODEL_ID) {
-        console.warn(`Attempting fallback to ${FALLBACK_MODEL_ID}...`);
+      // Determine candidate fallback models
+      const primaryFallback = getFallbackModelId(requestedModel);
+      const candidates = [
+        primaryFallback,
+        FALLBACK_MODEL_ID,
+      ].filter((m, idx, arr) => m !== requestedModel && arr.indexOf(m) === idx);
+
+      for (const fallbackModel of candidates) {
         try {
           const fallbackResponse = await ai.models.generateContent({
-            model: FALLBACK_MODEL_ID,
+            model: fallbackModel,
             contents: body.prompt,
           });
 
@@ -92,24 +110,19 @@ export async function POST(req: Request) {
             success: true,
             text: fallbackResponse.text ?? "",
             requestedModel,
-            actualModel: FALLBACK_MODEL_ID,
+            actualModel: fallbackModel,
             fallbackUsed: true,
-            fallbackReason:
-              primaryError instanceof Error
-                ? primaryError.message
-                : "Primary model failed",
+            fallbackReason: cleanReason,
           });
-        } catch (fallbackError) {
-          console.error("Fallback model request also failed:", fallbackError);
-          throw primaryError;
+        } catch {
+          // Continue to next fallback candidate if available
         }
       }
 
+      // If all fallbacks failed, throw the primary error to be handled below
       throw primaryError;
     }
   } catch (error) {
-    console.error("Gemini API request failed:", error);
-
     const message =
       error instanceof Error ? error.message : "Gemini API request failed";
 
